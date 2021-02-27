@@ -16,7 +16,8 @@ import math
 #       x-axis: words; y-axis: count
 
 UNIGRAM_OUT_FILE = "hw2-unigram-out.txt" 
-BIGRAM_OUT_FILE = "hw2-bigram-out.txt" 
+BIGRAM_OUT_FILE = "hw2-bigram-out.txt"
+TRIGRAM_OUT_FILE = "hw2-trigram-out.txt"
 GENERATED_UNIGRAM = "hw2-unigram-generated.txt"
 GENERATED_BIGRAM = "hw2-bigram-generated.txt"
 GENERATED_TRIGRAM = "hw2-trigram-generated.txt"
@@ -87,15 +88,6 @@ class LanguageModel:
         self.bad_word_list = self._take_bad_words(token_counts)
         self.vocab         = self._filter_out_bad_words(token_counts)
 
-        if self.is_laplace_smoothing:
-            # Add one to each possible ngram 
-            # (permute each token in vocab
-            #  for ngrams between 1 and ngram_size)
-            for ngram in it.permutations(
-                    (self.vocab + [self.UNK_TOKEN]), self.ngram_size):
-                ngram_counts[ngram] += 1
-                ngram_total_count += 1
-
         # Train on each line
         for line in lines:
             line_tokens = self._replace_bad_words(line.split())
@@ -104,10 +96,6 @@ class LanguageModel:
             if self.ngram_size > 1:
                 nlo_ngram_total_count += self._train_on_line(
                         self.ngram_size-1, line_tokens, nlo_ngram_counts)
-
-        # Add sizeof(V) to ngram_total_count
-        if self.is_laplace_smoothing:
-            ngram_total_count += sum(ngram_counts.values())
 
         # Derive and store the probabilities for each 
         # n-gram and nlo ngram, if appropriate
@@ -122,7 +110,7 @@ class LanguageModel:
         print('training done')
         print('num of unique {}-grams :={}'
               ''.format(self.ngram_size, len(ngram_counts.keys())))
-
+    
     def _replace_bad_words(self, tokens):
         """Return a transformation of tokens
            with "bad" words replaced by UNK_TOKEN"""
@@ -159,9 +147,8 @@ class LanguageModel:
         ngram_counts.update(ngrams)
         return len(ngrams)
 
-    @staticmethod
     @post_processing(zeroDefaultDictFactory)
-    def _derive_probabilities(ngram_total_count, ngram_counts):
+    def _derive_probabilities(self, ngram_total_count, ngram_counts):
         """Derive probabilities of each ngram from counts and total
 
         Args:
@@ -177,7 +164,7 @@ class LanguageModel:
                   in training
         """
         for ngram, count in ngram_counts.items():
-           yield (ngram, (count / ngram_total_count))
+            yield (ngram, (count / ngram_total_count))
 
     @staticmethod
     def _create_ngrams(ngram_size, tokens):
@@ -232,7 +219,13 @@ class LanguageModel:
         nlo_ngram = ngram[:self.ngram_size-1]
         ngram_prob = self.ngram_probabilities[ngram]
         nlo_ngram_prob = self.nlo_ngram_probabilities[nlo_ngram]
+        
+        if self.is_laplace_smoothing:
+            ngram_prob += 1
+            nlo_ngram_prob += len(self.ngram_probabilities.keys())
+
         return math.log(ngram_prob / nlo_ngram_prob, 2)
+
 
     def getPerplexity(self, filename):
         """Return perplexity of the file
@@ -335,7 +328,7 @@ class LanguageModel:
         probabilities = np.array(probabilities)
         # Below: Normalize, so numpy doesn't complain about 
         #        summing to 1
-        probabilities /= probabilities.sum() 
+        probabilities /= probabilities.sum()
         # Below: Choose an ngram from those available
         #        using the probability distribution;
         #        use len() because it looks like a 2d array,
@@ -360,15 +353,23 @@ if __name__ == '__main__':
     lm2 = LanguageModel(2, True)
     lm2.train(trainingFilePath)
 
+    lm3 = LanguageModel(3, True)
+    lm3.train(trainingFilePath)
+
     # Generate probability for each sentence
-    # in the test set using the training data
-    # and a unigram model
+    # in the test set using the training data...
     with open(testFilePath) as f:
         lines = f.readlines()
     
+    # ... and a unigram model
     with open(UNIGRAM_OUT_FILE, 'w') as f:
         for line in lines:
             f.write(str(lm1.score(line.strip())) + "\n")
+
+    # Generate 100 sentences using unigram model
+    with open(GENERATED_UNIGRAM, 'w') as f:
+        for sentence in lm1.generate(100):
+            f.write(' '.join(sentence) + "\n")
 
     # Generate probability for each sentence 
     # in the test using training data and bigram model
@@ -376,13 +377,21 @@ if __name__ == '__main__':
         for line in lines:
             f.write(str(lm2.score(line.strip())) + "\n")
 
-    # Generate 100 sentences using unigram model
-    with open(GENERATED_UNIGRAM, 'w') as f:
-        for sentence in lm1.generate(100):
-            f.write(' '.join(sentence) + "\n")
-
     # Generate 100 sentences using bigram model
     with open(GENERATED_BIGRAM, 'w') as f:
         for sentence in lm2.generate(100):
             f.write(' '.join(sentence) + "\n")
+
+    # Generate 100 sentences using bigram model
+    with open(GENERATED_TRIGRAM, 'w') as f:
+        for sentence in lm3.generate(100):
+            f.write(' '.join(sentence) + "\n")
+
+    # Generate probability for each sentence 
+    # in the test using training data and bigram model
+    with open(TRIGRAM_OUT_FILE, 'w') as f:
+        for line in lines:
+            f.write(str(lm3.score(line.strip())) + "\n")
+
+            
 
