@@ -3,7 +3,7 @@
 
 from collections import Counter
 from collections import defaultdict
-from funcy import post_processing
+from funcy import post_processing, collecting
 from matplotlib import pyplot as plt
 import itertools as it
 import numpy as np
@@ -19,6 +19,11 @@ UNIGRAM_OUT_FILE = "hw2-unigram-out.txt"
 BIGRAM_OUT_FILE = "hw2-bigram-out.txt" 
 GENERATED_UNIGRAM = "hw2-unigram-generated.txt"
 GENERATED_BIGRAM = "hw2-bigram-generated.txt"
+GENERATED_TRIGRAM = "hw2-trigram-generated.txt"
+
+
+def zeroDefaultDictFactory(d=None):
+    return {} if d is None else defaultdict(lambda: 0, d)
 
 
 class LanguageModel:
@@ -35,10 +40,10 @@ class LanguageModel:
         self.bad_word_list = []
         self.vocab = []
         
-        self.ngram_probabilities = {}
+        self.ngram_probabilities = zeroDefaultDictFactory()
         if self.ngram_size > 1:
             # NOTE: below, "nlo" = next lowest order
-            self.nlo_ngram_probabilities = {}
+            self.nlo_ngram_probabilities = zeroDefaultDictFactory()
         else:
             self.nlo_ngram_probabilities = defaultdict(lambda: 1) 
         print('initialized')
@@ -130,16 +135,16 @@ class LanguageModel:
     def _filter_out_bad_words(self, token_counts):
         return [k for (k, v) in token_counts.items() if v > self.COUNT_TO_BE_BAD]
 
-    def _train_on_line(self, ngram, tokens, ngram_counts):
+    def _train_on_line(self, ngram_size, tokens, ngram_counts):
         """Update our map of ngram_counts with all the ngrams to 
            which the given tokens map, using the given `ngram`.
            Return the number of ngrams encountered.
 
         Args:
+            ngram_size (int): The size of the length of the n-grams we 
+                         are going to use to model our training data.
             tokens (list): A list of tokens corresponding to one
                            sentence / line on which to train
-            ngram (int): The size of the length of the n-grams we 
-                         are going to use to model our training data.
             ngram_counts (Counter): A mapping between each n-gram
                                     and the number of times it has
                                     occurred so far in training 
@@ -150,12 +155,12 @@ class LanguageModel:
         
         """
 
-        ngrams = self._create_ngrams(ngram, tokens)
+        ngrams = self._create_ngrams(ngram_size, tokens)
         ngram_counts.update(ngrams)
         return len(ngrams)
 
     @staticmethod
-    @post_processing(dict)
+    @post_processing(zeroDefaultDictFactory)
     def _derive_probabilities(ngram_total_count, ngram_counts):
         """Derive probabilities of each ngram from counts and total
 
@@ -177,7 +182,7 @@ class LanguageModel:
     @staticmethod
     def _create_ngrams(ngram_size, tokens):
         """Turn a list of tokens into a list of n-grams 
-        of the given size / "ngram". 
+        of the given ngram_size. 
     
         Args:
             tokens (list): A list of tokens to be turned
@@ -193,7 +198,7 @@ class LanguageModel:
                          [("I", "am"), ("am", "Sam")]
         """
         ngrams = []
-        for i in range(ngram_size-1,len(tokens)):
+        for i in range(ngram_size-1, len(tokens)):
             ngram = tuple(tokens[i-ngram_size+1:i+1])
             ngrams.append(ngram)
         return ngrams
@@ -217,14 +222,17 @@ class LanguageModel:
         
         ngrams = self._create_ngrams(self.ngram_size, tokens)
         for ngram in ngrams:
-            # Below: backoff from ("I", "am", "Sam") to ("I", "am"),
-            #        the effective context with, e.g., ngram[:2] 
-            nlo_ngram = ngram[:self.ngram_size-1]
-            ngram_prob = self.ngram_probabilities[ngram]
-            nlo_ngram_prob = self.nlo_ngram_probabilities[nlo_ngram]
-            log_probability += math.log(ngram_prob / nlo_ngram_prob)
+            log_probability += self._score_ngram(ngram)
 
         return log_probability
+    
+    def _score_ngram(self, ngram):
+        # Below: backoff from, e.g., ("I", "am", "Sam") to ("I", "am"),
+        #        the effective context, with ngram[:2] 
+        nlo_ngram = ngram[:self.ngram_size-1]
+        ngram_prob = self.ngram_probabilities[ngram]
+        nlo_ngram_prob = self.nlo_ngram_probabilities[nlo_ngram]
+        return math.log(ngram_prob / nlo_ngram_prob, 2)
 
     def getPerplexity(self, filename):
         """Return perplexity of the file
@@ -237,9 +245,26 @@ class LanguageModel:
                    and a certain size of n-gram language model 
         """
 
-        print('perplexity using {}-grams :={}'.format())# TODO: put the proper variables
+        with open(filename) as f:
+            content = ' '.join(f.readlines())
+        tokens = content.split()
+        num_tokens = len(tokens)
+
+        # Replace unknown words with UNK_TOKEN
+        for i, token in enumerate(tokens):
+            if token not in self.vocab:
+                tokens[i] = self.UNK_TOKEN
+
+        # This is basically the equation for perplexity in log space
+        perplexity = self.score(''.join(tokens))
+        perplexity *= -(1 / num_tokens)
+        perplexity = math.exp(perplexity)
+
+        print('perplexity using {}-grams :={}'
+              ''.format(self.ngram_size, perplexity))
         return perplexity
 
+    @collecting
     def generate(self, num_sentences):
         """Generate a list of sentences using Shannon's method
 
@@ -251,45 +276,59 @@ class LanguageModel:
             list[string]: A list of sentences containing 
                           space-delimited words
         """
-        random_sentences=[]
         ngram_probabilities = self.ngram_probabilities.copy()
-        # Below: We don't want any start tokens showing up
+        # Below: We don't want any start tokens showing up;
+        #        This is not a concern for anything other than 
+        #        unigrams, as we will never have training bridging 
+        #        from any context to selecting a start token
         if self.ngram_size == 1:
             del ngram_probabilities[(self.START_TOKEN, )] 
         ngrams = list(ngram_probabilities.keys())
 
         for i in range(num_sentences):
-            
-            # Build a sentence
-            prev = self.START_TOKEN
+            yield self._generate_sentence(ngrams, ngram_probabilities)
+
+    def _generate_sentence(self, ngrams, ngram_probabilities):
+
+        # Build a sentence
+        prev = self.START_TOKEN
+        # For bigrams and higher, we need at least n-1 start tokens
+        if self.ngram_size > 1:
+            sentence = [prev] * (self.ngram_size-1)
+        else:
             sentence = [prev]
-            
-            while True:
+        
+        while True:
 
-                # Choose next word based on probabilities
-                # of those starting with previously selected,
-                # except if we are using a unigram model    
-                if self.ngram_size > 1:
-                    ngrams_starting_with_prev = \
-                        [n for n in ngrams if n[0] == prev] 
-                else:
-                    ngrams_starting_with_prev = list(ngrams)
+            # Choose next word based on probabilities
+            # of those starting with previously selected,
+            # except if we are using a unigram model    
+            if self.ngram_size > 1:
+                ngrams_starting_with_prev = \
+                    [n for n in ngrams if n[0] == prev] 
+            else:
+                ngrams_starting_with_prev = ngrams
 
-                probs_for_ngrams_starting_w_prev = \
-                    [self.ngram_probabilities[n] \
-                        for n in ngrams_starting_with_prev]
-                next_ngram = self._choose_using_distribution(
-                    ngrams_starting_with_prev,
-                    probs_for_ngrams_starting_w_prev
-                )
-                next_token = next_ngram[-1]
-                sentence.append(next_token)
-                prev = next_token
-                if next_token == self.END_TOKEN:
-                    break
+            probs_for_ngrams_starting_w_prev = \
+                [ngram_probabilities[n] \
+                    for n in ngrams_starting_with_prev]
+            next_ngram = self._choose_using_distribution(
+                ngrams_starting_with_prev,
+                probs_for_ngrams_starting_w_prev
+            )
+            next_token = next_ngram[-1]
+            sentence.append(next_token)
+            prev = next_token
+            if next_token == self.END_TOKEN:
+                break
+        
+        # For bigrams and higher, need n-1 end tokens;
+        # Ensure only that many are present 
+        if self.ngram_size > 1:
+            sentence = sentence[:-1] 
+            sentence.extend([self.END_TOKEN] * (self.ngram_size-1))
 
-            random_sentences.append(sentence)
-        return random_sentences
+        return sentence
 
     @staticmethod
     def _choose_using_distribution(choices, probabilities):
@@ -304,6 +343,7 @@ class LanguageModel:
         next_ngram_index = choice(
             len(choices), size=1, p=probabilities)[0]
         return choices[next_ngram_index]
+
 
 if __name__ == '__main__':
 
